@@ -38,6 +38,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.config import (  # noqa: E402
+    DISCOVER_LANGUAGES,
+    DISCOVER_MOVIE_GENRE_IDS,
+    DISCOVER_TV_GENRE_IDS,
     DUB_LANGUAGES,
     GENRE_ORDER,
     PRE_SELECT_MULTIPLIER,
@@ -365,6 +368,71 @@ def _enrich_with_youtube(
 
 
 # ---------------------------------------------------------------------------
+# Indian language discover supplement
+# ---------------------------------------------------------------------------
+
+
+def _fetch_discover_supplement(
+    raw_movies: List[RawMovie],
+    raw_series: List[RawTVSeries],
+    tmdb: TMDBClient,
+) -> Tuple[List[RawMovie], List[RawTVSeries]]:
+    """
+    Supplement trending results with language-specific TMDB discover calls.
+
+    Global trending skews toward English/Hollywood content. This function
+    adds Hindi, Kannada, Tamil, Telugu, and Malayalam content via targeted
+    discover queries, ensuring Indian language films are always in the
+    candidate pool regardless of global trending position.
+
+    Uses 1 page per language×genre combo to conserve API quota (~40 calls).
+
+    Args:
+        raw_movies: Existing trending movie records (mutated by dedup).
+        raw_series: Existing trending TV records (mutated by dedup).
+        tmdb:       Configured TMDBClient.
+
+    Returns:
+        Tuple of (supplemented_movies, supplemented_series) with deduplication.
+    """
+    log = logging.getLogger(__name__)
+
+    seen_movie_ids = {r.id for r in raw_movies}
+    seen_series_ids = {r.id for r in raw_series}
+    added_movies = 0
+    added_series = 0
+
+    for lang in DISCOVER_LANGUAGES:
+        for genre_id in DISCOVER_MOVIE_GENRE_IDS:
+            try:
+                discovered = tmdb.discover_movies(genre_id=genre_id, language=lang, max_pages=1)
+                for r in discovered:
+                    if r.id not in seen_movie_ids:
+                        raw_movies.append(r)
+                        seen_movie_ids.add(r.id)
+                        added_movies += 1
+            except Exception as exc:
+                log.warning("Discover movies failed (lang=%s, genre=%d): %s", lang, genre_id, exc)
+
+        for genre_id in DISCOVER_TV_GENRE_IDS:
+            try:
+                discovered = tmdb.discover_tv(genre_id=genre_id, language=lang, max_pages=1)
+                for r in discovered:
+                    if r.id not in seen_series_ids:
+                        raw_series.append(r)
+                        seen_series_ids.add(r.id)
+                        added_series += 1
+            except Exception as exc:
+                log.warning("Discover TV failed (lang=%s, genre=%d): %s", lang, genre_id, exc)
+
+    log.info(
+        "Discover supplement: added %d movies and %d series from Indian languages %s.",
+        added_movies, added_series, DISCOVER_LANGUAGES,
+    )
+    return raw_movies, raw_series
+
+
+# ---------------------------------------------------------------------------
 # Language filter for raw records
 # ---------------------------------------------------------------------------
 
@@ -499,6 +567,18 @@ def run_pipeline(dry_run: bool = False, force: bool = False) -> int:
     if not raw_movies and not raw_series:
         log.error("[FATAL] Zero records fetched from TMDB. Cannot generate report.")
         return 1
+
+    # ------------------------------------------------------------------
+    # Supplement trending with Indian language discover calls
+    # Ensures Hindi, Kannada, Tamil, Telugu, Malayalam content is always
+    # in the candidate pool regardless of global trending position.
+    # ------------------------------------------------------------------
+    log.info("Supplementing with Indian language discover (languages: %s)...", DISCOVER_LANGUAGES)
+    raw_movies, raw_series = _fetch_discover_supplement(raw_movies, raw_series, tmdb)
+    log.info(
+        "Total pool after supplement: %d movies, %d series.",
+        len(raw_movies), len(raw_series),
+    )
 
     # ------------------------------------------------------------------
     # UC-004: Language filter (on raw records before IMDB enrichment)

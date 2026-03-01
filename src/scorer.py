@@ -22,7 +22,9 @@ from src.config import (
     GENRE_ORDER,
     LANGUAGE_CODES,
     MIN_VOTE_COUNT,
+    MIN_VOTE_COUNT_REGIONAL,
     RECENCY_DAYS,
+    REGIONAL_LANGUAGES,
     SUPPORTED_LANGUAGES,
     TOP_N,
 )
@@ -338,22 +340,35 @@ def filter_by_ott(items: List[ContentItem]) -> List[ContentItem]:
     return result
 
 
-def filter_by_vote_count(items: List[ContentItem], min_count: int = MIN_VOTE_COUNT) -> List[ContentItem]:
+def filter_by_vote_count(
+    items: List[ContentItem],
+    min_count: int = MIN_VOTE_COUNT,
+    regional_min_count: int = MIN_VOTE_COUNT_REGIONAL,
+) -> List[ContentItem]:
     """
-    Remove items with fewer than min_count IMDB votes to avoid low-sample bias.
+    Remove items with insufficient IMDB votes to avoid low-sample bias.
+
+    Applies a lower threshold for Indian regional languages (kn/ta/te/ml)
+    since these are underrepresented on IMDB relative to their actual audience.
 
     Args:
-        items:     List of ContentItem objects.
-        min_count: Minimum number of IMDB votes required.
+        items:              List of ContentItem objects.
+        min_count:          Minimum votes for English and Hindi content.
+        regional_min_count: Lower minimum for Kannada, Tamil, Telugu, Malayalam.
 
     Returns:
-        Filtered list where every item has at least min_count votes.
+        Filtered list where every item meets the language-appropriate vote threshold.
     """
     before = len(items)
-    result = [item for item in items if item.vote_count >= min_count]
+
+    def _passes(item: ContentItem) -> bool:
+        threshold = regional_min_count if item.language in REGIONAL_LANGUAGES else min_count
+        return item.vote_count >= threshold
+
+    result = [item for item in items if _passes(item)]
     logger.info(
-        "Vote count filter (min=%d): %d -> %d items.",
-        min_count, before, len(result),
+        "Vote count filter (min=%d, regional_min=%d): %d -> %d items.",
+        min_count, regional_min_count, before, len(result),
     )
     return result
 

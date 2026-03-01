@@ -21,6 +21,18 @@ load_dotenv()
 TOP_N: int = 3
 RECENCY_DAYS: int = 365
 MIN_VOTE_COUNT: int = 50
+MIN_VOTE_COUNT_REGIONAL: int = 20  # lower threshold for Indian regional language content
+
+# Languages to supplement trending with targeted TMDB discover calls
+# (these are underrepresented in global trending but important for Indian audiences)
+DISCOVER_LANGUAGES: List[str] = ["hi", "kn", "ta", "te", "ml"]
+
+# Regional Indian languages that get the lower vote count threshold
+REGIONAL_LANGUAGES: List[str] = ["kn", "ta", "te", "ml"]
+
+# Genre IDs to use when calling discover (movie vs TV are different)
+DISCOVER_MOVIE_GENRE_IDS: List[int] = [28, 53, 18, 35]    # Action, Thriller, Drama, Comedy
+DISCOVER_TV_GENRE_IDS: List[int] = [10759, 9648, 18, 35]  # Action&Adventure, Mystery, Drama, Comedy
 
 # ---------------------------------------------------------------------------
 # Genre IDs (TMDB)

@@ -343,21 +343,25 @@ class TMDBClient:
     # Discover endpoints (supplemental / fallback)
     # ------------------------------------------------------------------
 
-    def discover_movies(self, genre_id: int, language: str) -> List[RawMovie]:
+    def discover_movies(self, genre_id: int, language: str, max_pages: int = 1) -> List[RawMovie]:
         """
-        Discover movies by genre and language (up to TMDB_MAX_PAGES pages).
+        Discover movies by genre and language.
 
         Args:
             genre_id:  TMDB genre ID to filter by.
             language:  ISO 639-1 language code for original_language filter.
+            max_pages: Maximum pages to fetch (default 1 to conserve API quota).
 
         Returns:
-            List of RawMovie objects.
+            List of RawMovie objects released within the last year.
         """
+        from datetime import date, timedelta
+        one_year_ago = (date.today() - timedelta(days=365)).strftime("%Y-%m-%d")
+
         movies: List[RawMovie] = []
         total_pages = 1
 
-        for page in range(1, TMDB_MAX_PAGES + 1):
+        for page in range(1, max_pages + 1):
             if page > total_pages:
                 break
 
@@ -365,6 +369,7 @@ class TMDBClient:
                 "with_genres": genre_id,
                 "with_original_language": language,
                 "sort_by": "popularity.desc",
+                "primary_release_date.gte": one_year_ago,
                 "page": page,
             })
             if data is None:
@@ -392,21 +397,25 @@ class TMDBClient:
 
         return movies
 
-    def discover_tv(self, genre_id: int, language: str) -> List[RawTVSeries]:
+    def discover_tv(self, genre_id: int, language: str, max_pages: int = 1) -> List[RawTVSeries]:
         """
-        Discover TV series by genre and language (up to TMDB_MAX_PAGES pages).
+        Discover TV series by genre and language.
 
         Args:
             genre_id:  TMDB genre ID to filter by.
             language:  ISO 639-1 language code for original_language filter.
+            max_pages: Maximum pages to fetch (default 1 to conserve API quota).
 
         Returns:
-            List of RawTVSeries objects.
+            List of RawTVSeries objects with first air date within the last year.
         """
+        from datetime import date, timedelta
+        one_year_ago = (date.today() - timedelta(days=365)).strftime("%Y-%m-%d")
+
         series: List[RawTVSeries] = []
         total_pages = 1
 
-        for page in range(1, TMDB_MAX_PAGES + 1):
+        for page in range(1, max_pages + 1):
             if page > total_pages:
                 break
 
@@ -414,6 +423,7 @@ class TMDBClient:
                 "with_genres": genre_id,
                 "with_original_language": language,
                 "sort_by": "popularity.desc",
+                "first_air_date.gte": one_year_ago,
                 "page": page,
             })
             if data is None:
