@@ -43,6 +43,7 @@ from src.config import (  # noqa: E402
     DISCOVER_TV_GENRE_IDS,
     DUB_LANGUAGES,
     GENRE_ORDER,
+    MAX_ENRICH_POOL,
     PRE_SELECT_MULTIPLIER,
     SUPPORTED_LANGUAGES,
     TOP_N,
@@ -585,6 +586,19 @@ def run_pipeline(dry_run: bool = False, force: bool = False) -> int:
     # ------------------------------------------------------------------
 
     raw_movies, raw_series = _filter_raw_by_language(raw_movies, raw_series)
+
+    # ------------------------------------------------------------------
+    # Cap enrichment pool to top N by TMDB popularity per category
+    # Discover supplement can produce 300+ candidates; calling
+    # external_ids for all of them burns too many TMDB API calls.
+    # Sorting by popularity keeps the most relevant titles.
+    # ------------------------------------------------------------------
+    if len(raw_movies) > MAX_ENRICH_POOL:
+        raw_movies = sorted(raw_movies, key=lambda r: r.popularity, reverse=True)[:MAX_ENRICH_POOL]
+        log.info("Capped movie pool to top %d by popularity.", MAX_ENRICH_POOL)
+    if len(raw_series) > MAX_ENRICH_POOL:
+        raw_series = sorted(raw_series, key=lambda r: r.popularity, reverse=True)[:MAX_ENRICH_POOL]
+        log.info("Capped series pool to top %d by popularity.", MAX_ENRICH_POOL)
 
     # ------------------------------------------------------------------
     # UC-009: IMDB enrichment via OMDb

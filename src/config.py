@@ -22,6 +22,7 @@ TOP_N: int = 3
 RECENCY_DAYS: int = 365
 MIN_VOTE_COUNT: int = 50
 MIN_VOTE_COUNT_REGIONAL: int = 20  # lower threshold for Indian regional language content
+MAX_ENRICH_POOL: int = 100         # max records per category (movies/series) before IMDB enrichment
 
 # Languages to supplement trending with targeted TMDB discover calls
 # (these are underrepresented in global trending but important for Indian audiences)
