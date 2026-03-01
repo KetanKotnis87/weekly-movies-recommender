@@ -62,6 +62,33 @@ POSTER_W = 80
 POSTER_H = 120
 
 # ---------------------------------------------------------------------------
+# V2 view count formatter
+# ---------------------------------------------------------------------------
+
+
+def _format_views(views: int) -> str:
+    """
+    Format a view count as a human-readable string.
+
+    Examples:
+        3_500_000 → '3.5M views'
+        750_000   → '750.0K views'
+        999       → '999 views'
+
+    Args:
+        views: Raw integer view count (non-negative).
+
+    Returns:
+        Formatted string with unit suffix (M / K) or raw integer.
+    """
+    if views >= 1_000_000:
+        return f"{views / 1_000_000:.1f}M views"
+    if views >= 1_000:
+        return f"{views / 1_000:.1f}K views"
+    return f"{views} views"
+
+
+# ---------------------------------------------------------------------------
 # Placeholder poster generator
 # ---------------------------------------------------------------------------
 
@@ -342,6 +369,24 @@ def _build_card(item: ContentItem, styles: Dict[str, ParagraphStyle], bg_colour:
         ott_str = "Not confirmed on major OTT"
     ott_para = Paragraph(f"<b>Platform:</b> {ott_str}", styles["card_meta"])
 
+    # -- V2: Google Trends score (UC-019) --
+    # Render "Trending: N/100" when trends score is available (including 0).
+    trends_para = None
+    if item.google_trends_score is not None:
+        trends_para = Paragraph(
+            f"Trending: {item.google_trends_score:.0f}/100",
+            styles["card_meta"],
+        )
+
+    # -- V2: YouTube trailer views (UC-019) --
+    # Render "Trailer: X.XM views" only when views > 0.
+    youtube_para = None
+    if item.youtube_views is not None and item.youtube_views > 0:
+        youtube_para = Paragraph(
+            f"Trailer: {_format_views(item.youtube_views)}",
+            styles["card_meta"],
+        )
+
     # -- Teaser overview --
     overview_para = Paragraph(
         f"<i>{_truncate(item.overview)}</i>",
@@ -357,9 +402,15 @@ def _build_card(item: ContentItem, styles: Dict[str, ParagraphStyle], bg_colour:
         rating_para,
         popularity_para,
         ott_para,
+    ]
+    if trends_para is not None:
+        right_content.append(trends_para)
+    if youtube_para is not None:
+        right_content.append(youtube_para)
+    right_content.extend([
         Spacer(1, 4),
         overview_para,
-    ]
+    ])
 
     # Build a nested table for the right column
     right_table = Table(

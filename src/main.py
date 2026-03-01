@@ -27,7 +27,7 @@ import os
 import sys
 from datetime import date, datetime
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
 # Bootstrap: ensure the project root is on sys.path so src.* imports work
@@ -40,8 +40,10 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.config import (  # noqa: E402
     DUB_LANGUAGES,
     GENRE_ORDER,
+    PRE_SELECT_MULTIPLIER,
     SUPPORTED_LANGUAGES,
     TOP_N,
+    TRENDS_SLEEP_SECONDS,
     load_config,
 )
 from src.data_fetcher import FatalAPIError, OMDbClient, RawMovie, RawTVSeries, TMDBClient  # noqa: E402
@@ -54,9 +56,11 @@ from src.scorer import (  # noqa: E402
     build_content_items_from_tv,
     deduplicate_across_genres,
     filter_by_recency,
+    pre_select_candidates,
     rank_and_select,
     score_item,
 )
+from src.trends_fetcher import GoogleTrendsFetcher, YouTubeFetcher  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Log directory and retention settings
@@ -299,6 +303,68 @@ def _download_posters(
 
 
 # ---------------------------------------------------------------------------
+# V2 enrichment helpers
+# ---------------------------------------------------------------------------
+
+
+def _enrich_with_trends(items: List[ContentItem], fetcher: GoogleTrendsFetcher) -> None:
+    """
+    Enrich items with Google Trends India interest score (UC-016).
+
+    Mutates each ContentItem in-place by setting google_trends_score.
+    None is stored when pytrends returns no data or raises an exception;
+    the scoring formula treats None as 0.0 (NFR-009).
+
+    Args:
+        items:   Pre-selected candidate pool to enrich.
+        fetcher: Configured GoogleTrendsFetcher instance.
+    """
+    log = logging.getLogger(__name__)
+    for item in items:
+        try:
+            score = fetcher.get_interest(title=item.title, year=item.release_year)
+            item.google_trends_score = score
+        except Exception as exc:
+            log.warning(
+                "[TRENDS] Unexpected error enriching '%s': %s. Defaulting to 0.",
+                item.title, exc,
+            )
+            item.google_trends_score = None
+
+
+def _enrich_with_youtube(
+    items: List[ContentItem],
+    fetcher: Optional[YouTubeFetcher],
+) -> None:
+    """
+    Enrich items with YouTube trailer view count (UC-017).
+
+    Mutates each ContentItem in-place by setting youtube_views.
+    No-op if fetcher is None (YOUTUBE_API_KEY not configured, FR-025).
+    None is stored when no trailer is found or an error occurs;
+    the scoring formula treats None as 0 (NFR-009).
+
+    Args:
+        items:   Pre-selected candidate pool to enrich.
+        fetcher: Configured YouTubeFetcher instance, or None to skip.
+    """
+    if fetcher is None:
+        return
+
+    log = logging.getLogger(__name__)
+    for item in items:
+        try:
+            views = fetcher.get_trailer_views(title=item.title, year=item.release_year)
+            item.youtube_views = views
+        except Exception as exc:
+            log.warning(
+                "[YOUTUBE] Unexpected error enriching '%s': %s. Defaulting to 0.",
+                item.title, exc,
+            )
+            item.youtube_views = None
+
+
+# ---------------------------------------------------------------------------
 # Language filter for raw records
 # ---------------------------------------------------------------------------
 
@@ -482,6 +548,64 @@ def run_pipeline(dry_run: bool = False, force: bool = False) -> int:
         item.score = score_item(item)
     for item in series_items:
         item.score = score_item(item)
+
+    # ------------------------------------------------------------------
+    # UC-018: Pre-select candidate pool for V2 enrichment (FR-022)
+    # Select top (TOP_N * PRE_SELECT_MULTIPLIER) candidates per genre per
+    # category so enrichment calls are bounded while all genre slots have
+    # candidates (HIGH-001 fix: bucket first, then pre-select per bucket).
+    # ------------------------------------------------------------------
+
+    # Bucket first (without dedup — just for candidate selection)
+    movie_genre_buckets = bucket_by_genre(movie_items)
+    series_genre_buckets = bucket_by_genre(series_items)
+
+    # Select top candidates per genre per category and merge into a set
+    candidate_set: Dict[int, ContentItem] = {}
+    for genre_items in list(movie_genre_buckets.values()) + list(series_genre_buckets.values()):
+        for item in pre_select_candidates(genre_items, top_n=TOP_N, multiplier=PRE_SELECT_MULTIPLIER):
+            candidate_set[item.id] = item
+
+    all_candidates = list(candidate_set.values())
+    log.info("V2 enrichment pool: %d candidates across all genres.", len(all_candidates))
+
+    # UC-016: Google Trends enrichment (CRITICAL-002: wrap in try/except ImportError)
+    try:
+        trends_fetcher = GoogleTrendsFetcher(sleep_seconds=TRENDS_SLEEP_SECONDS)
+        _enrich_with_trends(all_candidates, trends_fetcher)
+        trends_fetcher.log_summary()
+    except ImportError:
+        log.warning(
+            "pytrends is not installed — Google Trends enrichment skipped. "
+            "Run: pip install pytrends"
+        )
+
+    # UC-017: YouTube enrichment (optional — skip if no API key)
+    yt_fetcher: Optional[YouTubeFetcher] = None
+    if cfg.youtube_api_key:
+        yt_fetcher = YouTubeFetcher(api_key=cfg.youtube_api_key)  # CRITICAL-001: cfg not config
+        _enrich_with_youtube(all_candidates, yt_fetcher)
+        yt_fetcher.log_summary()
+    else:
+        log.warning(
+            "YOUTUBE_API_KEY not set — YouTube enrichment skipped. "
+            "Set it in .env to enable trailer view signals."
+        )
+
+    # Rescore with all 5 signals populated
+    for item in all_candidates:
+        item.score = score_item(item)
+
+    # Rebuild movie_items and series_items from enriched candidates + non-candidate items
+    # so all items remain available for genre bucketing (HIGH-001 fix).
+    enriched_map = {item.id: item for item in all_candidates}
+    movie_items = [enriched_map.get(item.id, item) for item in movie_items]
+    series_items = [enriched_map.get(item.id, item) for item in series_items]
+
+    log.info(
+        "After V2 enrichment: %d movie candidates, %d series candidates.",
+        len(movie_items), len(series_items),
+    )
 
     # ------------------------------------------------------------------
     # UC-008: Bucket by genre, deduplicate, rank, select top-N

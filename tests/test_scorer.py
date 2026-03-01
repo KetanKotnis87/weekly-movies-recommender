@@ -19,6 +19,7 @@ from src.scorer import (
     filter_by_ott,
     filter_by_recency,
     filter_by_vote_count,
+    pre_select_candidates,
     rank_and_select,
     score_item,
 )
@@ -334,23 +335,25 @@ class TestScoreItem:
 
     def test_score_item_canonical_test_case(self):
         """
-        Verify canonical test case with updated weights (0.55/0.25/0.20):
-        tmdb_popularity=100.0, imdb_rating=7.5, vote_count=10000
-        Expected: (7.5/10)*0.55 + (100.0/200)*0.25 + (5000/5000)*0.20
-                = 0.4125 + 0.125 + 0.20
-                = 0.7375
+        Verify canonical test case with V2 weights (0.45/0.20/0.15/0.10/0.10).
+        tmdb_popularity=100.0, imdb_rating=7.5, vote_count=10000,
+        google_trends_score=None, youtube_views=None (both default to 0).
+
+        Expected: (7.5/10)*0.45 + (100.0/200)*0.20 + (5000/5000)*0.15 + 0 + 0
+                = 0.3375 + 0.10 + 0.15
+                = 0.5875
         """
         item = _make_item(1, "Test Movie", popularity=100.0, imdb_rating=7.5, vote_count=10000)
         score = score_item(item)
 
-        expected_rating = (7.5 / 10) * 0.55
-        expected_popularity = (min(100.0, 200) / 200) * 0.25
-        expected_votes = (min(10000, 5000) / 5000) * 0.20
+        expected_rating = (7.5 / 10) * 0.45
+        expected_popularity = (min(100.0, 200) / 200) * 0.20
+        expected_votes = (min(10000, 5000) / 5000) * 0.15
         expected = round(expected_rating + expected_popularity + expected_votes, 4)
 
         assert abs(score - expected) < 0.001
-        # Verify approximately 0.7375 with new weights (0.55/0.25/0.20)
-        assert 0.73 < score < 0.75
+        # Verify approximately 0.5875 with V2 weights
+        assert 0.58 < score < 0.60
 
     def test_score_item_imdb_rating_zero_produces_valid_score(self):
         """imdb_rating=0 (not None) still produces a valid, non-negative score (UC-007 AC-2)."""
@@ -369,11 +372,11 @@ class TestScoreItem:
 
         assert score >= 0.0
         assert isinstance(score, float)
-        # With None, rating component = 0
+        # With None, rating component = 0; V2 signals also default to 0 (None fields)
         expected = round(
             0.0
-            + (min(100.0, 200) / 200) * 0.25
-            + (min(1000, 5000) / 5000) * 0.20,
+            + (min(100.0, 200) / 200) * 0.20
+            + (min(1000, 5000) / 5000) * 0.15,
             4,
         )
         assert abs(score - expected) < 0.001
@@ -384,9 +387,10 @@ class TestScoreItem:
         item.vote_count = 0
         score = score_item(item)
 
+        # V2 formula: votes_component = 0 when vote_count=0; V2 signals default to 0
         expected = round(
-            (7.0 / 10) * 0.55
-            + (min(100.0, 200) / 200) * 0.25
+            (7.0 / 10) * 0.45
+            + (min(100.0, 200) / 200) * 0.20
             + 0.0,
             4,
         )
@@ -661,3 +665,230 @@ class TestKannadaScarcity:
             if genre_items:
                 result = rank_and_select(genre_items, genre=genre)
                 assert isinstance(result, list)
+
+
+# ---------------------------------------------------------------------------
+# V2 scoring tests — UC-020 (5-signal formula with graceful degradation)
+# ---------------------------------------------------------------------------
+
+
+class TestScoreItemV2Signals:
+    """
+    Tests for the V2 5-signal composite score formula with Google Trends
+    and YouTube signals.  Covers UC-020 degradation behaviour.
+    """
+
+    def test_score_item_with_trends_signal(self):
+        """
+        UC-020 AC-5: A title with google_trends_score=80.0 and youtube_views=None
+        contributes (80/100)*0.10 = 0.08 extra over the 3-signal baseline.
+        """
+        # Build a baseline item (no V2 signals)
+        baseline = _make_item(1, "Baseline", popularity=100.0, imdb_rating=7.5, vote_count=5000)
+        baseline_score = score_item(baseline)
+
+        # Add Trends signal only
+        item_with_trends = _make_item(2, "WithTrends", popularity=100.0, imdb_rating=7.5, vote_count=5000)
+        item_with_trends.google_trends_score = 80.0
+        item_with_trends.youtube_views = None
+        trends_score = score_item(item_with_trends)
+
+        expected_trends_contribution = (80.0 / 100) * 0.10
+        assert abs(trends_score - (baseline_score + expected_trends_contribution)) < 1e-4
+
+    def test_score_item_with_youtube_signal(self):
+        """
+        UC-020 AC-5: A title with youtube_views=5_000_000 and google_trends_score=None
+        contributes (5M/10M)*0.10 = 0.05 extra over the 3-signal baseline.
+        """
+        baseline = _make_item(1, "Baseline", popularity=100.0, imdb_rating=7.5, vote_count=5000)
+        baseline_score = score_item(baseline)
+
+        item_with_yt = _make_item(2, "WithYT", popularity=100.0, imdb_rating=7.5, vote_count=5000)
+        item_with_yt.google_trends_score = None
+        item_with_yt.youtube_views = 5_000_000
+        yt_score = score_item(item_with_yt)
+
+        expected_yt_contribution = (min(5_000_000, 10_000_000) / 10_000_000) * 0.10
+        assert abs(yt_score - (baseline_score + expected_yt_contribution)) < 1e-4
+
+    def test_score_item_with_both_v2_signals(self):
+        """
+        UC-020 (5-signal formula): With both V2 signals set, all 5 components
+        sum correctly and the score is within the expected range.
+        """
+        item = _make_item(3, "FullSignal", popularity=100.0, imdb_rating=7.5, vote_count=5000)
+        item.google_trends_score = 80.0
+        item.youtube_views = 5_000_000
+
+        result = score_item(item)
+
+        rating_c    = (7.5 / 10) * 0.45
+        pop_c       = (min(100.0, 200) / 200) * 0.20
+        votes_c     = (min(5000, 5000) / 5000) * 0.15
+        trends_c    = (80.0 / 100) * 0.10
+        youtube_c   = (min(5_000_000, 10_000_000) / 10_000_000) * 0.10
+        expected = round(rating_c + pop_c + votes_c + trends_c + youtube_c, 4)
+
+        assert abs(result - expected) < 1e-4
+
+    def test_score_item_degrades_to_v1_when_signals_none(self):
+        """
+        UC-020 AC-3: When both V2 signals are None, the score equals the
+        3-signal result (Trends and YouTube contribute 0.0 each).
+        The score must be identical whether we set both to None explicitly
+        or leave them at their default.
+        """
+        item_default = _make_item(1, "Default", popularity=150.0, imdb_rating=8.0, vote_count=3000)
+        # google_trends_score and youtube_views are None by default in _make_item
+
+        item_explicit_none = _make_item(2, "ExplicitNone", popularity=150.0, imdb_rating=8.0, vote_count=3000)
+        item_explicit_none.google_trends_score = None
+        item_explicit_none.youtube_views = None
+
+        score_default = score_item(item_default)
+        score_explicit = score_item(item_explicit_none)
+
+        assert score_default == score_explicit
+
+    def test_score_item_youtube_views_capped_at_10_million(self):
+        """
+        YouTube views are capped at 10M; 50M views yields the same contribution as 10M.
+        """
+        item_10m = _make_item(1, "10M Views", popularity=100.0, imdb_rating=7.0, vote_count=1000)
+        item_10m.youtube_views = 10_000_000
+
+        item_50m = _make_item(2, "50M Views", popularity=100.0, imdb_rating=7.0, vote_count=1000)
+        item_50m.youtube_views = 50_000_000
+
+        assert score_item(item_10m) == score_item(item_50m)
+
+    def test_score_item_trends_score_zero_adds_nothing(self):
+        """
+        A google_trends_score of 0 (valid data, but zero interest) contributes
+        exactly 0.0 to the score — same as None.
+        """
+        item_none = _make_item(1, "NoTrends", popularity=100.0, imdb_rating=7.0, vote_count=1000)
+        item_none.google_trends_score = None
+
+        item_zero = _make_item(2, "ZeroTrends", popularity=100.0, imdb_rating=7.0, vote_count=1000)
+        item_zero.google_trends_score = 0.0
+
+        assert score_item(item_none) == score_item(item_zero)
+
+    def test_score_maximum_possible_is_1_0(self):
+        """
+        With all signals at their maximum values, the score is exactly 1.0.
+        """
+        item = _make_item(1, "Perfect", popularity=200.0, imdb_rating=10.0, vote_count=5000)
+        item.google_trends_score = 100.0
+        item.youtube_views = 10_000_000
+
+        assert score_item(item) == 1.0
+
+
+# ---------------------------------------------------------------------------
+# pre_select_candidates tests — UC-018
+# ---------------------------------------------------------------------------
+
+
+class TestPreSelectCandidates:
+    """
+    Tests for pre_select_candidates() — UC-018.
+
+    Note: pre_select_candidates() operates on a flat list and selects the
+    top (top_n * multiplier) items globally.  The test suite validates the
+    function's contract as implemented; the per-genre-bucket logic defect
+    (HIGH-001) is corroborated separately.
+    """
+
+    def test_pre_select_returns_top_n_times_multiplier(self):
+        """
+        UC-018 AC-1 analogue: given 20 items, top_n=3, multiplier=2 → 6 returned.
+        """
+        items = [
+            _make_item(i, f"Movie {i}", popularity=float(100 - i), imdb_rating=7.0, vote_count=1000)
+            for i in range(1, 21)  # 20 items
+        ]
+        # Assign scores so they are differentiable
+        for item in items:
+            item.score = score_item(item)
+
+        result = pre_select_candidates(items, top_n=3, multiplier=2)
+
+        assert len(result) == 6
+
+    def test_pre_select_returns_all_when_fewer_than_pool(self):
+        """
+        UC-018 AF-1: When total items (4) < pool size (6), all 4 are returned.
+        """
+        items = [
+            _make_item(i, f"Movie {i}", popularity=float(100 - i), imdb_rating=7.0, vote_count=1000)
+            for i in range(1, 5)  # only 4 items
+        ]
+        for item in items:
+            item.score = score_item(item)
+
+        result = pre_select_candidates(items, top_n=3, multiplier=2)
+
+        assert len(result) == 4
+
+    def test_pre_select_sorted_by_score_desc(self):
+        """
+        UC-018 Main Flow step 3: The returned list is sorted by score descending;
+        the highest-scored item is first.
+        """
+        # Deliberately create items with decreasing scores
+        low  = _make_item(1, "Low Score",  popularity=10.0,  imdb_rating=5.0, vote_count=100)
+        mid  = _make_item(2, "Mid Score",  popularity=50.0,  imdb_rating=7.0, vote_count=1000)
+        high = _make_item(3, "High Score", popularity=150.0, imdb_rating=9.0, vote_count=5000)
+
+        for item in [low, mid, high]:
+            item.score = score_item(item)
+
+        result = pre_select_candidates([low, mid, high], top_n=3, multiplier=2)
+
+        assert result[0].title == "High Score"
+
+    def test_pre_select_returns_empty_on_empty_input(self):
+        """Edge case: empty input produces empty output."""
+        result = pre_select_candidates([], top_n=3, multiplier=2)
+        assert result == []
+
+    def test_pre_select_pool_size_is_top_n_times_multiplier(self):
+        """
+        The pool_size = top_n * multiplier contract: with top_n=5, multiplier=3,
+        pool_size=15; given 20 items, exactly 15 are returned.
+        """
+        items = [
+            _make_item(i, f"Film {i}", popularity=float(200 - i), imdb_rating=7.0, vote_count=1000)
+            for i in range(1, 21)  # 20 items
+        ]
+        for item in items:
+            item.score = score_item(item)
+
+        result = pre_select_candidates(items, top_n=5, multiplier=3)
+
+        assert len(result) == 15
+
+    def test_pre_select_tiebreak_by_popularity_then_title(self):
+        """
+        UC-018 AF-3 tiebreak: items with identical scores are broken by
+        higher tmdb_popularity, then alphabetically by title.
+        """
+        # Force identical scores by using identical parameters
+        item_z = _make_item(1, "Z Film", popularity=200.0, imdb_rating=7.0, vote_count=1000)
+        item_a = _make_item(2, "A Film", popularity=100.0, imdb_rating=7.0, vote_count=1000)
+        item_m = _make_item(3, "M Film", popularity=200.0, imdb_rating=7.0, vote_count=1000)
+
+        # Force identical raw scores to test tiebreaking
+        item_z.score = 0.5000
+        item_a.score = 0.5000
+        item_m.score = 0.5000
+
+        # With pool_size=2, tiebreak: popularity 200 (Z Film, M Film) beat popularity 100 (A Film)
+        result = pre_select_candidates([item_z, item_a, item_m], top_n=1, multiplier=2)
+
+        assert len(result) == 2
+        result_titles = {item.title for item in result}
+        assert "A Film" not in result_titles

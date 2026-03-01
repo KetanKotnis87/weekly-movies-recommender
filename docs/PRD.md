@@ -170,3 +170,59 @@ Titles with no IMDB rating shall receive an IMDB component score of 0.
 | OQ-005 | What happens if Gmail App Password expires or is revoked? | Assumed the operator monitors the execution log and reconfigures the credential. No automated alerting in v1.0. |
 | OQ-006 | Should Web Series include both completed and ongoing series? | Assumed yes, provided the `first_air_date` is within the last 365 days. |
 | OQ-007 | Is the IMDB vote count threshold required to prevent low-sample titles from ranking high? | Assumed no minimum vote count for v1.0. The composite score formula naturally down-weights titles with low vote counts via the log10 component. |
+
+---
+
+## V2 Additions — Google Trends & YouTube Enrichment
+
+### V2 Problem Statement
+V1 scoring relies solely on IMDB ratings and TMDB popularity. These signals are global and
+do not capture real-time Indian audience interest. V2 adds two India-specific signals to
+surface content that is genuinely trending in India right now.
+
+### V2 Goals
+- Add India-specific search buzz signal (Google Trends, geo=IN)
+- Add genuine audience engagement signal (YouTube trailer views)
+- Keep all V2 enrichment within free API tiers
+- Gracefully degrade to V1 behaviour when new APIs are unavailable
+
+### V2 Functional Requirements
+
+**FR-019** — The system shall query Google Trends (pytrends) for each candidate title using
+geo=IN and timeframe="now 7-d", returning an interest score (0–100). If pytrends fails for
+any title, that title's Trends score shall default to 0 without aborting the pipeline.
+
+**FR-020** — The system shall query YouTube Data API v3 for each candidate title's official
+trailer using search.list (query: "{title} {year} official trailer", maxResults=1), then
+fetch viewCount via videos.list. If the YouTube API fails or returns no results, that title's
+view count shall default to 0 without aborting the pipeline.
+
+**FR-021** — The composite scoring formula shall be updated to 5 signals:
+score = (imdb_rating/10)*0.45 + (min(popularity,200)/200)*0.20 + (min(votes,5000)/5000)*0.15
+      + (trends_score/100)*0.10 + (min(yt_views,10_000_000)/10_000_000)*0.10
+
+**FR-022** — Google Trends and YouTube enrichment shall run only on a pre-selected candidate
+pool of top-6 items per genre (PRE_SELECT_MULTIPLIER=2 × TOP_N=3), not on all fetched items,
+to conserve API quota.
+
+**FR-023** — Total YouTube Data API v3 usage per run shall not exceed 5,000 units
+(well within the 10,000 units/day free quota).
+
+**FR-024** — The PDF report shall display the Google Trends score ("Trending: N/100") and
+YouTube trailer views ("Trailer: X.XM views") on each content card where data is available.
+If data is unavailable for a title, those fields shall be omitted from that card.
+
+**FR-025** — The system shall accept YOUTUBE_API_KEY as an optional environment variable.
+If absent or empty, YouTube enrichment shall be skipped with a WARNING log message, and
+score contribution from YouTube shall be 0 for all titles.
+
+**FR-026** — Google Trends requests shall be spaced at least 1.5 seconds apart to avoid
+triggering Google rate-limiting on the unofficial pytrends endpoint.
+
+### V2 Non-Functional Requirements
+
+**NFR-008** — V2 enrichment (Google Trends + YouTube) shall add no more than 3 minutes to
+total pipeline execution time (at 1.5s/title × 48 titles = ~72s for Trends; YouTube is async).
+
+**NFR-009** — V2 shall remain fully functional as V1 (no Trends/YouTube data) if both new
+APIs fail simultaneously. Rankings shall fall back to the 3-signal V1 formula automatically.

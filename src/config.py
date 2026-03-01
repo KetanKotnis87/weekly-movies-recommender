@@ -135,6 +135,25 @@ MAX_RETRIES: int = 3
 RETRY_DELAYS: List[int] = [1, 2, 4]  # seconds between successive attempts
 
 # ---------------------------------------------------------------------------
+# YouTube Data API v3 settings
+# ---------------------------------------------------------------------------
+YOUTUBE_SEARCH_URL: str = "https://www.googleapis.com/youtube/v3/search"
+YOUTUBE_VIDEOS_URL: str = "https://www.googleapis.com/youtube/v3/videos"
+YOUTUBE_MAX_VIEWS_CAP: int = 10_000_000  # normalisation cap (10M views = 1.0)
+
+# ---------------------------------------------------------------------------
+# Google Trends settings
+# ---------------------------------------------------------------------------
+TRENDS_GEO: str = "IN"
+TRENDS_TIMEFRAME: str = "now 7-d"
+TRENDS_SLEEP_SECONDS: float = 1.5
+
+# ---------------------------------------------------------------------------
+# V2 enrichment candidate pool
+# ---------------------------------------------------------------------------
+PRE_SELECT_MULTIPLIER: int = 2  # enrich top TOP_N * PRE_SELECT_MULTIPLIER per genre
+
+# ---------------------------------------------------------------------------
 # Config dataclass with validation
 # ---------------------------------------------------------------------------
 
@@ -153,6 +172,7 @@ class Config:
     gmail_address: str = field(default_factory=lambda: "")
     gmail_app_password: str = field(default_factory=lambda: "")
     recipient_email: str = field(default_factory=lambda: "")
+    youtube_api_key: str = field(default_factory=lambda: "")
 
     def __post_init__(self) -> None:
         """Load values from environment and validate that none are missing."""
@@ -161,6 +181,8 @@ class Config:
         self.gmail_address = self._require("GMAIL_ADDRESS")
         self.gmail_app_password = self._require("GMAIL_APP_PASSWORD")
         self.recipient_email = self._require("RECIPIENT_EMAIL")
+        # Optional — no error raised if absent; YouTube enrichment is skipped (FR-025)
+        self.youtube_api_key = os.environ.get("YOUTUBE_API_KEY", "").strip()
 
     @staticmethod
     def _require(var: str) -> str:

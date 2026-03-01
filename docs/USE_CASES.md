@@ -718,3 +718,212 @@ This document specifies all 15 use cases for the Weekly Movie & Web Series Recom
 | OQ-005 | UC-013 | Operator monitors execution logs; no automated alerting for expired Gmail App Password in v1.0. |
 | OQ-006 | UC-003, UC-006 | Ongoing TV series are included provided `first_air_date` is within 365 days. |
 | OQ-007 | UC-007 | No minimum vote count threshold for v1.0; the `log10` component naturally down-weights low-vote titles. |
+
+---
+
+## V2 Use Cases
+
+---
+
+### UC-016: Fetch Google Trends Score for India Per Title
+
+**ID**: UC-016
+**Actor**: System
+**Priority**: High
+**Related FRs**: FR-019, FR-022, FR-026
+
+**Preconditions**:
+- UC-018 has produced the pre-selected candidate pool (top 6 per genre per category by partial score).
+- The `pytrends` library is installed and importable.
+- The system has outbound HTTPS access to `trends.google.com`.
+
+**Main Flow**:
+1. The system iterates over each title in the pre-selected candidate pool produced by UC-018.
+2. For each title, the system instantiates a `TrendReq` object with `hl='en-US'` and `tz=330` (IST offset).
+3. The system calls `build_payload([title], geo='IN', timeframe='now 7-d')` using the title's display name.
+4. The system calls `interest_over_time()` and reads the integer interest value from the returned DataFrame for the title keyword; the value represents the peak interest on a 0–100 scale for the past 7 days in India.
+5. The system stores the retrieved integer as `trends_score` on the candidate record.
+6. The system waits exactly 1.5 seconds before making the next pytrends request, regardless of whether the current request succeeded or failed.
+7. The system logs the `trends_score` for each title in the format "Trends [IN]: {title} → {score}".
+
+**Alternate Flows**:
+- AF-1: `interest_over_time()` returns an empty DataFrame (pytrends returns no data for the title in the specified timeframe) — the system sets `trends_score = 0` for the affected title, logs "Trends [IN]: {title} → no data, defaulting to 0", and continues to the next title.
+- AF-2: The pytrends call raises any exception (network error, `ResponseError`, `TooManyRequestsError`) — the system catches the exception, sets `trends_score = None` for the affected title (which is treated as 0 in the scoring formula), logs "Trends [IN]: {title} → FAILED ({exception_type}), defaulting to 0", and continues; the 1.5-second sleep is still applied before the next call.
+- AF-3: The `pytrends` library is not installed or fails to import — the system logs a WARNING "pytrends not available; Google Trends enrichment skipped for all titles", sets `trends_score = None` for every candidate, and proceeds directly to scoring using a 0 contribution for the Trends signal.
+- AF-4: The same title text produces a multi-keyword ambiguity (pytrends returns multiple columns) — the system reads only the column whose header exactly matches the queried title string; if no exact match exists, the system defaults to 0.
+
+**Postconditions**:
+- Every title in the pre-selected candidate pool has a `trends_score` value (integer 0–100 or `None` treated as 0).
+- The total elapsed time for all pytrends calls is at least `(N - 1) * 1.5` seconds, where N is the number of titles in the pool, due to mandatory inter-request sleep.
+- The execution log contains one Trends score entry per title.
+
+**Acceptance Criteria**:
+- AC-1: For a title where pytrends returns a DataFrame with a peak interest value of 72, `trends_score` is stored as the integer `72` (not a float, not a string).
+- AC-2: For a title where pytrends returns an empty DataFrame, `trends_score` is `0` and the pipeline does not raise an exception.
+- AC-3: For a title where pytrends raises a `TooManyRequestsError`, `trends_score` is `0`, the exception is caught and logged at WARNING level, and the pipeline continues to process the next title without aborting.
+- AC-4: When processing a pool of N titles, the total number of inter-request sleep intervals is exactly N - 1, and each interval is at least 1.5 seconds, verifiable from log timestamps.
+- AC-5: No Google Trends call is made for any title that was not included in the pre-selected candidate pool produced by UC-018; titles excluded at the pre-selection stage have `trends_score = None`.
+
+---
+
+### UC-017: Fetch YouTube Trailer View Count Per Title
+
+**ID**: UC-017
+**Actor**: System
+**Priority**: High
+**Related FRs**: FR-020, FR-022, FR-023, FR-025
+
+**Preconditions**:
+- UC-018 has produced the pre-selected candidate pool (top 6 per genre per category by partial score).
+- `YOUTUBE_API_KEY` environment variable is set to a valid YouTube Data API v3 key.
+- The system has outbound HTTPS access to `www.googleapis.com`.
+
+**Main Flow**:
+1. The system reads `YOUTUBE_API_KEY` from the environment.
+2. For each title in the pre-selected candidate pool, the system extracts the display name and the 4-digit release year from the record's `release_date` or `first_air_date`.
+3. The system constructs a YouTube Data API v3 `search.list` request with: `q="{title} {year} official trailer"`, `part=snippet`, `maxResults=1`, `type=video`, `key={YOUTUBE_API_KEY}`.
+4. The system sends the `search.list` request and extracts the `videoId` from the first item in the `items` array of the response.
+5. The system constructs a `videos.list` request with: `id={videoId}`, `part=statistics`, `key={YOUTUBE_API_KEY}`.
+6. The system sends the `videos.list` request and extracts `viewCount` from `items[0].statistics.viewCount`, converting it from a string to an integer.
+7. The system stores the integer as `yt_views` on the candidate record.
+8. The system logs "YouTube: {title} → {yt_views} views (video ID: {videoId})".
+
+**Alternate Flows**:
+- AF-1: The `search.list` response returns an empty `items` array (no matching video found) — the system sets `yt_views = None` (treated as 0 in scoring) for the affected title, logs "YouTube: {title} → no trailer found, defaulting to 0", and continues.
+- AF-2: The `videos.list` response returns an empty `items` array (video ID no longer valid) — the system sets `yt_views = None`, logs "YouTube: {title} → video not found for ID {videoId}, defaulting to 0", and continues.
+- AF-3: Either the `search.list` or `videos.list` request returns HTTP 403 with `quotaExceeded` error — the system catches the error, sets `yt_views = None` for the current title and all remaining titles in the pool (to avoid further quota consumption), logs a WARNING "YouTube API quota exceeded; YouTube enrichment disabled for remaining titles", and continues the pipeline with the 0 contribution for YouTube signal on all affected titles.
+- AF-4: Either API call raises a network-level exception (timeout, connection error) — the system sets `yt_views = None` for the affected title, logs the exception at WARNING level, and continues to the next title.
+- AF-5: The `viewCount` field is absent from `statistics` (e.g., views are hidden by the channel) — the system sets `yt_views = None` (treated as 0), logs "YouTube: {title} → viewCount unavailable, defaulting to 0".
+
+**Postconditions**:
+- Every title in the pre-selected candidate pool has a `yt_views` value (positive integer or `None` treated as 0 in scoring).
+- Total YouTube Data API v3 units consumed for the run does not exceed 5,000 (each `search.list` costs 100 units; each `videos.list` costs 1 unit; maximum pool size of 48 titles yields at most 4,848 units).
+- The execution log contains one YouTube view count entry per title processed.
+
+**Acceptance Criteria**:
+- AC-1: For a title where `search.list` returns a video ID and `videos.list` returns `viewCount = "3500000"`, `yt_views` is stored as the integer `3500000`.
+- AC-2: For a title where `search.list` returns an empty `items` array, `yt_views` is `None`, the pipeline does not raise an exception, and the log contains "no trailer found" for that title.
+- AC-3: When the API returns HTTP 403 with `quotaExceeded`, all subsequent titles in the pool have `yt_views = None` without making any additional YouTube API calls; a single WARNING log entry records the quota exhaustion event.
+- AC-4: The total YouTube Data API unit cost across the entire run does not exceed 5,000 units, computed as `(search.list calls * 100) + (videos.list calls * 1)`, verifiable from the log entry "YouTube API units consumed: {total}".
+- AC-5: No YouTube API call is made for any title not in the pre-selected candidate pool produced by UC-018.
+
+---
+
+### UC-018: Pre-Select Candidate Pool Before Enrichment
+
+**ID**: UC-018
+**Actor**: System
+**Priority**: Medium
+**Related FRs**: FR-022
+
+**Preconditions**:
+- UC-006 has produced recency-filtered lists of movies and TV series candidates (all titles that passed language, genre, and recency filters).
+- UC-009 has completed OMDb enrichment for all recency-filtered candidates, attaching `imdb_rating`, `imdb_vote_count`, and `tmdb_popularity` to each record.
+- The constants `TOP_N = 3` and `PRE_SELECT_MULTIPLIER = 2` are statically configured, making the pre-selection pool size `TOP_N * PRE_SELECT_MULTIPLIER = 6` per genre per category.
+
+**Main Flow**:
+1. The system groups the recency-filtered and OMDb-enriched candidates by genre and category (Movies, Web Series), mirroring the same genre-category bucketing used in UC-007 and UC-008.
+2. For each genre-category bucket, the system computes a partial composite score using only the three V1 signals: `partial_score = (tmdb_popularity * 0.4) + (imdb_rating * 10 * 0.4) + (log10(imdb_vote_count + 1) * 0.2)`. Titles with `imdb_rating = None` receive 0 for that component, identical to V1 behaviour.
+3. The system ranks all candidates within each bucket by `partial_score` descending.
+4. The system selects the top `min(6, N)` candidates from each bucket, where N is the total number of candidates in that bucket, forming the pre-selected pool.
+5. The system passes the pre-selected pool (at most 6 titles per genre per category, at most 48 titles total) to UC-016 and UC-017 for V2 enrichment.
+6. The system logs for each genre-category bucket: the total candidate count, the pre-selected count, and the `partial_score` of the highest- and lowest-ranked candidate in the pool.
+
+**Alternate Flows**:
+- AF-1: A genre-category bucket contains fewer than 6 candidates — the system selects all available candidates for that bucket without padding, logs "Pre-select: {genre} {category} — {N} of {N} available (pool < 6)", and passes all N to enrichment.
+- AF-2: A genre-category bucket contains 0 candidates — the system logs "Pre-select: {genre} {category} — 0 candidates, skipping enrichment for this bucket" and passes an empty list to UC-016 and UC-017 for that bucket; no enrichment calls are made for that bucket.
+- AF-3: Two candidates share the same `partial_score` at the boundary of the top-6 cut (e.g., both are ranked 6th) — the system uses `tmdb_popularity` as the tiebreaker (higher popularity is included in the pool); if still equal, the alphabetically earlier title is included.
+
+**Postconditions**:
+- A pre-selected candidate pool exists in memory containing at most 6 titles per genre per category (at most 48 titles total across 4 genres x 2 categories).
+- Every title in the pool has a computed `partial_score` value.
+- UC-016 and UC-017 receive only the pre-selected pool; no title outside the pool undergoes Google Trends or YouTube enrichment.
+- The execution log contains a pre-selection summary for each genre-category bucket.
+
+**Acceptance Criteria**:
+- AC-1: Given a genre-category bucket with 10 candidates, exactly 6 are selected for the pool — the 6 with the highest `partial_score` — and the remaining 4 do not receive any Google Trends or YouTube API calls.
+- AC-2: Given a genre-category bucket with 4 candidates, exactly 4 are selected (no padding to 6), and the log entry for that bucket reads "Pre-select: {genre} {category} — 4 of 4 available (pool < 6)".
+- AC-3: The `partial_score` formula used in pre-selection is identical to the V1 composite score formula (same weights: 0.4 / 0.4 / 0.2), verifiable by unit test comparing pre-selection scores to V1 composite scores for the same input values.
+- AC-4: When two candidates tie at the 6th position by `partial_score`, the one with the higher `tmdb_popularity` is included in the pool and the other is excluded; both cases are reflected in the log.
+- AC-5: The maximum number of titles entering UC-016 (Google Trends) and UC-017 (YouTube) across the entire run is 48 (4 genres x 2 categories x 6 titles); no run exceeds this limit.
+
+---
+
+### UC-019: Display Trends Score and YouTube Views in PDF
+
+**ID**: UC-019
+**Actor**: System
+**Priority**: Medium
+**Related FRs**: FR-024
+
+**Preconditions**:
+- UC-016 has attached `trends_score` (integer 0–100 or `None`) to each selected title in the final recommendation list.
+- UC-017 has attached `yt_views` (positive integer or `None`) to each selected title.
+- UC-012's PDF generation is in progress; content card rendering is about to begin for each title.
+
+**Main Flow**:
+1. For each title in the final recommendation list, the system begins rendering its PDF content card.
+2. If `trends_score` is a non-None integer (including 0), the system renders the label "Trending: {trends_score}/100" on the card, where `{trends_score}` is the integer value with no decimal places.
+3. If `yt_views` is a non-None positive integer, the system formats the view count for display: values >= 1,000,000 are formatted as `{X.X}M views` (rounded to 1 decimal place); values >= 1,000 but < 1,000,000 are formatted as `{X.X}K views`; values < 1,000 are displayed as the raw integer followed by " views". The system renders the label "Trailer: {formatted_views}" on the card.
+4. If `trends_score` is `None`, the "Trending" field is omitted from the card entirely; no placeholder, dash, or "N/A" is rendered for that field.
+5. If `yt_views` is `None` or 0, the "Trailer" field is omitted from the card entirely; no placeholder, dash, or "N/A" is rendered for that field.
+6. The system continues rendering all remaining card fields (poster, title, IMDB rating, OTT platform, etc.) regardless of whether the V2 fields are present or absent.
+
+**Alternate Flows**:
+- AF-1: A title was not included in the pre-selected candidate pool (UC-018) and therefore has neither `trends_score` nor `yt_views` attributes on its record — the system treats both as `None` and omits both fields from the card silently, with no exception raised.
+- AF-2: `yt_views` is exactly `0` (a title with zero views, which can happen if a trailer exists but has no recorded views) — the system treats this as equivalent to `None` and omits the "Trailer" field from the card.
+- AF-3: `trends_score` is exactly `0` (a title with measurably zero search interest in India this week) — unlike `yt_views`, a `trends_score` of `0` is a valid data point and IS rendered as "Trending: 0/100" on the card (not omitted).
+
+**Postconditions**:
+- Every card in the PDF renders "Trending: N/100" if and only if the title's `trends_score` is a non-None integer.
+- Every card in the PDF renders "Trailer: X.XM views" (or equivalent K/raw format) if and only if the title's `yt_views` is a non-None integer greater than 0.
+- No card contains the text "None", "N/A", "0 views", or a blank label for Trends or YouTube where data is absent — those fields are simply omitted.
+
+**Acceptance Criteria**:
+- AC-1: A card for a title with `trends_score = 85` and `yt_views = 3500000` displays exactly "Trending: 85/100" and "Trailer: 3.5M views" on the rendered card, verifiable by inspecting the PDF.
+- AC-2: A card for a title with `trends_score = 0` displays "Trending: 0/100" (not omitted), confirming that a zero Trends score is treated as present data.
+- AC-3: A card for a title with `yt_views = None` does not contain the text "Trailer" anywhere on that card in the PDF.
+- AC-4: A card for a title with `yt_views = 750000` displays "Trailer: 750.0K views" (K format, not M format).
+- AC-5: A card for a title with `trends_score = None` and `yt_views = None` renders all 9 existing V1 card fields without raising an exception and without any visible gap or broken layout where the V2 fields would have appeared.
+
+---
+
+### UC-020: Gracefully Degrade When Trends or YouTube Unavailable
+
+**ID**: UC-020
+**Actor**: System
+**Priority**: High
+**Related FRs**: FR-019, FR-020, FR-025, NFR-009
+
+**Preconditions**:
+- The pipeline has reached the enrichment stage (UC-016 and/or UC-017) and one or both of the following conditions is true:
+  - pytrends is unavailable, has raised an unrecoverable error, or has been skipped due to repeated failures.
+  - `YOUTUBE_API_KEY` is absent or empty, or the YouTube API has returned a quota-exceeded or authentication error.
+- UC-009 (OMDb enrichment) has already completed successfully, providing `imdb_rating`, `imdb_vote_count`, and `tmdb_popularity` on all candidate records.
+
+**Main Flow**:
+1. The system checks `trends_score` for each title at scoring time (UC-007 equivalent for V2).
+2. If `trends_score` is `None` for a title (pytrends failed or was skipped), the Trends signal contribution is set to `0.0` in the 5-signal formula for that title: `(trends_score / 100) * 0.10` evaluates to `0.0`.
+3. The system checks `yt_views` for each title at scoring time.
+4. If `yt_views` is `None` for a title (YouTube enrichment failed or was skipped), the YouTube signal contribution is set to `0.0` in the 5-signal formula for that title: `(min(yt_views, 10_000_000) / 10_000_000) * 0.10` evaluates to `0.0`.
+5. If `YOUTUBE_API_KEY` is absent or empty at startup, the system logs exactly one WARNING entry: "YOUTUBE_API_KEY not set; YouTube enrichment skipped. Score contribution will be 0 for all titles." No per-title warnings are emitted for missing YouTube data in this case.
+6. If both `trends_score` and `yt_views` are `None` for all titles (total V2 failure), the effective scoring formula collapses to: `score = (imdb_rating / 10) * 0.45 + (min(popularity, 200) / 200) * 0.20 + (min(votes, 5000) / 5000) * 0.15`, which is functionally equivalent to a 3-signal V1-style ranking (though with updated weights, not the original V1 weights).
+7. The pipeline continues to produce a PDF and send an email using the degraded scores; no run is aborted solely because V2 enrichment data is unavailable.
+8. The system logs a summary at the end of the scoring step: "Scoring: trends available for {M} of {N} titles; YouTube available for {P} of {N} titles."
+
+**Alternate Flows**:
+- AF-1: pytrends succeeds for some titles but fails for others — the system uses the actual `trends_score` for titles where it succeeded and `0.0` contribution for titles where it failed; no special handling beyond what is described in the main flow is required.
+- AF-2: YouTube succeeds for some titles but quota is exhausted partway through the pool — the system uses actual `yt_views` for titles already enriched and `0.0` for remaining titles; the quota exhaustion WARNING is logged once when it occurs (per UC-017 AF-3).
+- AF-3: Both pytrends and YouTube fail on the same run and `YOUTUBE_API_KEY` is set — the system emits two separate WARNING log entries (one for pytrends failure, one for YouTube failure) and continues; the final report is generated using only the 3 available signals at their respective weights.
+
+**Postconditions**:
+- The pipeline produces a valid PDF report and sends an email regardless of the availability of Google Trends and YouTube enrichment data.
+- The final composite score for every title is a non-negative float computed from whatever signals are available (1 to 5 signals), with missing signals contributing 0.
+- The execution log contains the scoring summary line reporting how many titles received Trends and YouTube data.
+
+**Acceptance Criteria**:
+- AC-1: When pytrends raises an exception for every title in the pool, all titles have `trends_score = None`, the Trends signal contributes exactly `0.0` to every title's composite score, the pipeline does not abort, and a PDF and email are produced for that run.
+- AC-2: When `YOUTUBE_API_KEY` is not set in the environment, the pipeline emits exactly one WARNING log entry containing "YOUTUBE_API_KEY not set", makes zero YouTube API calls, and assigns `yt_views = None` to all titles without any per-title WARNING entries.
+- AC-3: When both pytrends and YouTube are completely unavailable, the composite scores computed for all titles are mathematically equivalent to applying the V2 5-signal formula with `trends_score = 0` and `yt_views = 0` for all titles; the ranking order of titles must be deterministic and reproducible for the same input IMDB/TMDB data.
+- AC-4: The execution log's scoring summary line matches the format "Scoring: trends available for {M} of {N} titles; YouTube available for {P} of {N} titles" where M, P, and N are non-negative integers and M <= N and P <= N.
+- AC-5: A run in which only pytrends fails (YouTube succeeds for all titles) still uses actual `yt_views` values in scoring for all titles that received YouTube data; the YouTube signal is NOT zeroed out due to pytrends failure — each signal degrades independently.

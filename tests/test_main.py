@@ -110,6 +110,8 @@ def patch_full_pipeline(tmp_path, mock_env_vars):
 
     with patch("src.main.TMDBClient") as mock_tmdb_cls, \
          patch("src.main.OMDbClient") as mock_omdb_cls, \
+         patch("src.main.GoogleTrendsFetcher") as mock_trends_cls, \
+         patch("src.main.YouTubeFetcher") as mock_yt_cls, \
          patch("src.main.generate_pdf") as mock_generate_pdf, \
          patch("src.main.send_report") as mock_send_report, \
          patch("src.main.setup_logging") as mock_setup_logging, \
@@ -134,6 +136,16 @@ def patch_full_pipeline(tmp_path, mock_env_vars):
         mock_omdb.fetch_ratings.return_value = (7.5, 5000)
         mock_omdb_cls.return_value = mock_omdb
 
+        # Configure GoogleTrendsFetcher mock — returns None (no real network calls)
+        mock_trends = MagicMock()
+        mock_trends.get_interest.return_value = None
+        mock_trends_cls.return_value = mock_trends
+
+        # Configure YouTubeFetcher mock — not used (no YOUTUBE_API_KEY in test env)
+        mock_yt = MagicMock()
+        mock_yt.get_trailer_views.return_value = None
+        mock_yt_cls.return_value = mock_yt
+
         # Configure PDF generation mock — creates an actual file
         output_dir = tmp_path / "output"
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -150,6 +162,8 @@ def patch_full_pipeline(tmp_path, mock_env_vars):
         mocks = {
             "tmdb": mock_tmdb,
             "omdb": mock_omdb,
+            "trends": mock_trends,
+            "yt": mock_yt,
             "generate_pdf": mock_generate_pdf,
             "send_report": mock_send_report,
             "rotate_logs": mock_rotate_logs,
@@ -512,6 +526,7 @@ class TestFatalErrorHandling:
         with patch("src.main.date") as mock_date, \
              patch("src.main.TMDBClient") as mock_tmdb_cls, \
              patch("src.main.OMDbClient") as mock_omdb_cls, \
+             patch("src.main.GoogleTrendsFetcher") as mock_trends_cls, \
              patch("src.main.generate_pdf") as mock_generate_pdf, \
              patch("src.main.setup_logging") as mock_logging, \
              patch("src.main.rotate_logs"), \
@@ -533,6 +548,11 @@ class TestFatalErrorHandling:
             mock_omdb = MagicMock()
             mock_omdb.fetch_ratings.return_value = (7.5, 5000)
             mock_omdb_cls.return_value = mock_omdb
+
+            # Mock Google Trends fetcher to avoid real network calls
+            mock_trends = MagicMock()
+            mock_trends.get_interest.return_value = None
+            mock_trends_cls.return_value = mock_trends
 
             # PDF generation raises an exception
             mock_generate_pdf.side_effect = Exception("PDF generation failed")

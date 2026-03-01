@@ -52,9 +52,11 @@ class ContentItem:
         overview:         Full TMDB overview string.
         poster_path:      TMDB poster path (e.g. '/abcdef.jpg') or None.
         ott_platforms:    List of confirmed Indian OTT platform names.
-        score:            Composite score (computed by score_item()).
-        poster_image:     Downloaded image bytes or None.
-        imdb_id:          IMDB ID string or None.
+        score:                Composite score (computed by score_item()).
+        poster_image:         Downloaded image bytes or None.
+        imdb_id:              IMDB ID string or None.
+        google_trends_score:  Google Trends India interest (0–100) or None if unavailable.
+        youtube_views:        YouTube trailer view count (int) or None if unavailable.
     """
 
     id: int
@@ -73,6 +75,8 @@ class ContentItem:
     poster_image: Optional[bytes] = None
     imdb_id: Optional[str] = None
     spoken_languages: List[str] = field(default_factory=list)  # additional spoken language codes
+    google_trends_score: Optional[float] = None   # raw 0–100; None if unavailable
+    youtube_views: Optional[int] = None           # raw view count; None if unavailable
 
     # ------------------------------------------------------------------
     # Convenience properties
@@ -135,17 +139,29 @@ def _truncate_overview(text: str, max_chars: int = 120) -> str:
 
 def score_item(item: ContentItem) -> float:
     """
-    Compute the composite score for a ContentItem.
+    Compute the composite score for a ContentItem using 5 signals (V2 formula).
 
     Formula:
-        score = (imdb_rating / 10) * 0.55          # quality signal — highest weight
-              + (min(tmdb_popularity, 200) / 200) * 0.25   # buzz signal
-              + (min(vote_count, 5000) / 5000) * 0.20      # confidence signal
+        score = (imdb_rating / 10) * 0.45
+              + (min(tmdb_popularity, 200) / 200) * 0.20
+              + (min(vote_count, 5000) / 5000) * 0.15
+              + (google_trends_score / 100) * 0.10
+              + (min(youtube_views, 10_000_000) / 10_000_000) * 0.10
 
-    All three components are normalised to [0, 1] before weighting, so the
-    maximum possible score is 1.0 (when rating=10, popularity>=200, votes>=5000).
-    IMDB rating carries the most weight to favour critically acclaimed content
-    over viral but poorly rated titles.
+    All five components are normalised to [0, 1] before weighting, so the
+    maximum possible score is 1.0.  V2 signals (Trends and YouTube) default
+    to 0 when their data is unavailable (None), preserving V1 ranking order
+    for titles that were not enriched (NFR-009).
+
+    Signal breakdown:
+        IMDB rating (0.45):      Quality signal — highest weight; favours
+                                 critically acclaimed content.
+        TMDB popularity (0.20):  Global buzz signal; caps at 200 to prevent
+                                 outliers dominating.
+        Vote count (0.15):       Confidence signal; caps at 5,000 votes.
+        Google Trends IN (0.10): India-specific search interest (7-day window).
+        YouTube views (0.10):    Audience engagement via official trailer views;
+                                 caps at 10M views.
 
     Args:
         item: The ContentItem to score.
@@ -157,12 +173,62 @@ def score_item(item: ContentItem) -> float:
     rating = float(item.imdb_rating) if item.imdb_rating is not None else 0.0
     votes = max(0, item.vote_count or 0)
 
-    rating_component = (rating / 10) * 0.55
-    popularity_component = (min(popularity, 200) / 200) * 0.25
-    votes_component = (min(votes, 5000) / 5000) * 0.20
+    rating_component    = (rating / 10) * 0.45
+    popularity_component = (min(popularity, 200) / 200) * 0.20
+    votes_component     = (min(votes, 5000) / 5000) * 0.15
+    trends_component    = ((item.google_trends_score or 0.0) / 100) * 0.10
+    youtube_component   = (min(item.youtube_views or 0, 10_000_000) / 10_000_000) * 0.10
 
-    raw_score = rating_component + popularity_component + votes_component
+    raw_score = (
+        rating_component
+        + popularity_component
+        + votes_component
+        + trends_component
+        + youtube_component
+    )
     return round(raw_score, 4)
+
+
+# ---------------------------------------------------------------------------
+# V2 candidate pre-selection
+# ---------------------------------------------------------------------------
+
+
+def pre_select_candidates(
+    items: List[ContentItem],
+    top_n: int = TOP_N,
+    multiplier: int = 2,
+) -> List[ContentItem]:
+    """
+    Select top (top_n * multiplier) items by partial score before V2 enrichment.
+
+    Partial score uses IMDB + popularity + votes only (V1 formula weights
+    0.45/0.20/0.15, normalised to sum=0.80 so the ranking order is the same
+    as the full formula with V2 signals at 0).  Used to limit Google Trends
+    and YouTube API calls to a manageable pool (UC-018, FR-022).
+
+    Args:
+        items:      Full list of recency-filtered ContentItem objects.
+        top_n:      Final recommendation count per genre (default: TOP_N=3).
+        multiplier: Pool size factor; pool = top_n * multiplier (default: 2).
+
+    Returns:
+        Sorted list of at most (top_n * multiplier) items with the highest
+        partial scores.  If len(items) <= pool_size, all items are returned.
+    """
+    pool_size = top_n * multiplier
+    # Items already have scores computed with V2 fields at None (= 0),
+    # so their current score IS the partial score.
+    sorted_items = sorted(
+        items,
+        key=lambda x: (-x.score, -x.tmdb_popularity, x.title.lower()),
+    )
+    selected = sorted_items[:min(pool_size, len(items))]
+    logger.info(
+        "Pre-select: %d of %d items chosen for V2 enrichment (pool=%d).",
+        len(selected), len(items), pool_size,
+    )
+    return selected
 
 
 # ---------------------------------------------------------------------------
