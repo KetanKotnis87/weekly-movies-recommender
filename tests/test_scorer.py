@@ -41,6 +41,7 @@ def _make_item(
     vote_count: int = 1000,
     ott_platforms: list = None,
     overview: str = "A test overview.",
+    spoken_languages: list = None,
 ):
     """Create a minimal ContentItem for testing."""
     if genres is None:
@@ -49,6 +50,8 @@ def _make_item(
         release_date = (date.today() - timedelta(days=100)).strftime("%Y-%m-%d")
     if ott_platforms is None:
         ott_platforms = ["Netflix"]
+    if spoken_languages is None:
+        spoken_languages = [language]
 
     item = ContentItem(
         id=tmdb_id,
@@ -63,6 +66,7 @@ def _make_item(
         overview=overview,
         poster_path=f"/{title}.jpg",
         ott_platforms=ott_platforms,
+        spoken_languages=spoken_languages,
     )
     item.score = score_item(item)
     return item
@@ -89,32 +93,47 @@ class TestFilterByLanguage:
         languages = {item.language for item in result}
         assert languages == {"hi", "en", "kn"}
 
-    def test_filter_drops_tamil_content(self):
-        """Drops items with language='ta' (Tamil) (UC-004 AC-1)."""
+    def test_filter_keeps_tamil_content(self):
+        """Tamil (ta) is now a supported South Indian language (UC-004)."""
         items = [
             _make_item(1, "Tamil Movie", language="ta"),
             _make_item(2, "English Movie", language="en"),
         ]
         result = filter_by_language(items)
 
-        assert len(result) == 1
-        assert result[0].language == "en"
+        assert len(result) == 2
 
-    def test_filter_drops_telugu_content(self):
-        """Drops items with language='te' (Telugu)."""
+    def test_filter_keeps_telugu_content(self):
+        """Telugu (te) is now a supported South Indian language."""
         items = [
             _make_item(1, "Telugu Movie", language="te"),
         ]
         result = filter_by_language(items)
-        assert result == []
+        assert len(result) == 1
 
-    def test_filter_drops_malayalam_content(self):
-        """Drops items with language='ml' (Malayalam)."""
+    def test_filter_keeps_malayalam_content(self):
+        """Malayalam (ml) is now a supported South Indian language."""
         items = [
             _make_item(1, "Malayalam Movie", language="ml"),
         ]
         result = filter_by_language(items)
+        assert len(result) == 1
+
+    def test_filter_drops_unsupported_language_without_dub(self):
+        """Japanese content with no Hindi/English/Kannada dub is dropped."""
+        items = [
+            _make_item(1, "Japanese Movie", language="ja", spoken_languages=["ja"]),
+        ]
+        result = filter_by_language(items)
         assert result == []
+
+    def test_filter_keeps_foreign_content_with_hindi_dub(self):
+        """Korean movie dubbed in Hindi passes the language filter."""
+        items = [
+            _make_item(1, "Korean Movie", language="ko", spoken_languages=["ko", "hi"]),
+        ]
+        result = filter_by_language(items)
+        assert len(result) == 1
 
     def test_filter_empty_list_returns_empty(self):
         """Empty input returns empty output without error (UC-004 AF-3)."""
@@ -122,10 +141,12 @@ class TestFilterByLanguage:
         assert result == []
 
     def test_filter_custom_languages_parameter(self):
-        """Custom languages parameter is respected."""
+        """Custom languages parameter is respected — only items whose original
+        language is in the custom list pass (spoken_languages dub check uses
+        DUB_LANGUAGES, not the custom list)."""
         items = [
-            _make_item(1, "Hindi Movie", language="hi"),
-            _make_item(2, "Tamil Movie", language="ta"),
+            _make_item(1, "Tamil Movie", language="ta", spoken_languages=["ta"]),
+            _make_item(2, "Telugu Movie", language="te", spoken_languages=["te"]),
         ]
         result = filter_by_language(items, languages=["ta"])
 
@@ -313,26 +334,23 @@ class TestScoreItem:
 
     def test_score_item_canonical_test_case(self):
         """
-        Verify canonical test case from FR-007:
+        Verify canonical test case with updated weights (0.55/0.25/0.20):
         tmdb_popularity=100.0, imdb_rating=7.5, vote_count=10000
-        Formula: (imdb_rating / 10) * 0.40
-               + (min(tmdb_popularity, 200) / 200) * 0.40
-               + (min(vote_count, 5000) / 5000) * 0.20
-        Expected: (7.5/10)*0.40 + (100.0/200)*0.40 + (5000/5000)*0.20
-                = 0.30 + 0.20 + 0.20
-                = 0.70
+        Expected: (7.5/10)*0.55 + (100.0/200)*0.25 + (5000/5000)*0.20
+                = 0.4125 + 0.125 + 0.20
+                = 0.7375
         """
         item = _make_item(1, "Test Movie", popularity=100.0, imdb_rating=7.5, vote_count=10000)
         score = score_item(item)
 
-        expected_rating = (7.5 / 10) * 0.40
-        expected_popularity = (min(100.0, 200) / 200) * 0.40
+        expected_rating = (7.5 / 10) * 0.55
+        expected_popularity = (min(100.0, 200) / 200) * 0.25
         expected_votes = (min(10000, 5000) / 5000) * 0.20
         expected = round(expected_rating + expected_popularity + expected_votes, 4)
 
         assert abs(score - expected) < 0.001
-        # Verify approximately 0.70
-        assert 0.69 < score < 0.71
+        # Verify approximately 0.7375 with new weights (0.55/0.25/0.20)
+        assert 0.73 < score < 0.75
 
     def test_score_item_imdb_rating_zero_produces_valid_score(self):
         """imdb_rating=0 (not None) still produces a valid, non-negative score (UC-007 AC-2)."""
@@ -354,7 +372,7 @@ class TestScoreItem:
         # With None, rating component = 0
         expected = round(
             0.0
-            + (min(100.0, 200) / 200) * 0.40
+            + (min(100.0, 200) / 200) * 0.25
             + (min(1000, 5000) / 5000) * 0.20,
             4,
         )
@@ -367,8 +385,8 @@ class TestScoreItem:
         score = score_item(item)
 
         expected = round(
-            (7.0 / 10) * 0.40
-            + (min(100.0, 200) / 200) * 0.40
+            (7.0 / 10) * 0.55
+            + (min(100.0, 200) / 200) * 0.25
             + 0.0,
             4,
         )

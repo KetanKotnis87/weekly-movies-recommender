@@ -38,6 +38,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.config import (  # noqa: E402
+    DUB_LANGUAGES,
     GENRE_ORDER,
     SUPPORTED_LANGUAGES,
     TOP_N,
@@ -307,10 +308,12 @@ def _filter_raw_by_language(
     raw_series: List[RawTVSeries],
 ) -> Tuple[List[RawMovie], List[RawTVSeries]]:
     """
-    Filter raw records by supported language (original_language or spoken).
+    Filter raw records by language accessibility.
 
-    A record passes if original_language OR any spoken_language code is in
-    SUPPORTED_LANGUAGES.
+    A record passes if:
+      1. original_language is in SUPPORTED_LANGUAGES (hi/en/kn/ta/te/ml), OR
+      2. spoken_languages includes a dub language (hi/en/kn) — covers
+         non-Indian content dubbed for Indian OTT audiences.
 
     Args:
         raw_movies:  Raw movie records.
@@ -321,14 +324,12 @@ def _filter_raw_by_language(
     """
     log = logging.getLogger(__name__)
     langs = set(SUPPORTED_LANGUAGES)
+    dubs = set(DUB_LANGUAGES)
 
     def _passes(record) -> bool:
         if record.original_language in langs:
             return True
-        for code in record.spoken_languages:
-            if code in langs:
-                return True
-        return False
+        return any(code in dubs for code in record.spoken_languages)
 
     movies_before = len(raw_movies)
     series_before = len(raw_series)

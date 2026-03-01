@@ -17,6 +17,7 @@ from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
 from src.config import (
+    DUB_LANGUAGES,
     GENRE_ID_TO_NAME,
     GENRE_ORDER,
     LANGUAGE_CODES,
@@ -136,13 +137,15 @@ def score_item(item: ContentItem) -> float:
     """
     Compute the composite score for a ContentItem.
 
-    Formula (FR-007):
-        score = (imdb_rating / 10) * 0.40
-              + (min(tmdb_popularity, 200) / 200) * 0.40   [0.0 if imdb_rating is None]
-              + (min(vote_count, 5000) / 5000) * 0.20
+    Formula:
+        score = (imdb_rating / 10) * 0.55          # quality signal — highest weight
+              + (min(tmdb_popularity, 200) / 200) * 0.25   # buzz signal
+              + (min(vote_count, 5000) / 5000) * 0.20      # confidence signal
 
     All three components are normalised to [0, 1] before weighting, so the
     maximum possible score is 1.0 (when rating=10, popularity>=200, votes>=5000).
+    IMDB rating carries the most weight to favour critically acclaimed content
+    over viral but poorly rated titles.
 
     Args:
         item: The ContentItem to score.
@@ -154,8 +157,8 @@ def score_item(item: ContentItem) -> float:
     rating = float(item.imdb_rating) if item.imdb_rating is not None else 0.0
     votes = max(0, item.vote_count or 0)
 
-    rating_component = (rating / 10) * 0.40
-    popularity_component = (min(popularity, 200) / 200) * 0.40
+    rating_component = (rating / 10) * 0.55
+    popularity_component = (min(popularity, 200) / 200) * 0.25
     votes_component = (min(votes, 5000) / 5000) * 0.20
 
     raw_score = rating_component + popularity_component + votes_component
@@ -169,27 +172,33 @@ def score_item(item: ContentItem) -> float:
 
 def filter_by_language(items: List[ContentItem], languages: Optional[List[str]] = None) -> List[ContentItem]:
     """
-    Keep only items whose original_language OR any spoken_language is in the permitted list.
+    Keep items that are accessible in a supported language.
 
-    Matches FR-003: a title passes if original_language OR any entry in
-    spoken_languages is in the target language set.
+    A title passes if ANY of the following is true:
+      1. original_language is in the supported set (hi/en/kn/ta/te/ml).
+      2. spoken_languages includes any dub language (hi/en/kn) — catches
+         non-Indian content (e.g. Korean, Japanese, French) that has been
+         dubbed into Hindi or English for Indian OTT platforms.
 
     Args:
         items:     List of ContentItem objects to filter.
-        languages: Permitted ISO 639-1 language codes. Defaults to SUPPORTED_LANGUAGES.
+        languages: Permitted original-language codes. Defaults to SUPPORTED_LANGUAGES.
 
     Returns:
-        Filtered list containing only items in the permitted languages.
+        Filtered list containing only accessible items.
     """
     if languages is None:
         languages = SUPPORTED_LANGUAGES
     lang_set = set(languages)
+    dub_set = set(DUB_LANGUAGES)
     before = len(items)
 
     def _passes(item: ContentItem) -> bool:
+        # Criterion 1: original language is directly supported
         if item.language in lang_set:
             return True
-        return any(code in lang_set for code in item.spoken_languages)
+        # Criterion 2: dubbed/translated into Hindi, English, or Kannada
+        return any(code in dub_set for code in item.spoken_languages)
 
     result = [item for item in items if _passes(item)]
     logger.info(

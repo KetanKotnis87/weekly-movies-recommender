@@ -59,9 +59,19 @@ LANGUAGE_CODES: Dict[str, str] = {
     "hi": "Hindi",
     "en": "English",
     "kn": "Kannada",
+    "ta": "Tamil",
+    "te": "Telugu",
+    "ml": "Malayalam",
 }
 
+# All languages whose original-language content is included directly
 SUPPORTED_LANGUAGES: List[str] = list(LANGUAGE_CODES.keys())
+
+# South Indian languages (subset of SUPPORTED_LANGUAGES)
+SOUTH_INDIAN_LANGUAGES: List[str] = ["kn", "ta", "te", "ml"]
+
+# Content in any other language passes the filter if dubbed in one of these
+DUB_LANGUAGES: List[str] = ["hi", "en", "kn"]
 
 # ---------------------------------------------------------------------------
 # OTT provider ID mapping for India (TMDB provider IDs)
