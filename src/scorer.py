@@ -323,18 +323,29 @@ def filter_by_recency(items: List[ContentItem], days: int = RECENCY_DAYS) -> Lis
 
 def filter_by_ott(items: List[ContentItem]) -> List[ContentItem]:
     """
-    Keep only items that have at least one confirmed Indian OTT platform.
+    Keep items that have confirmed Indian OTT availability OR are regional
+    Indian language content.
+
+    TMDB's watch provider database is incomplete for regional Indian platforms
+    (Namma OTT, Sun NXT, Aha, Manorama MAX) that carry Kannada, Tamil, Telugu,
+    and Malayalam content. Dropping these on missing OTT data gives a false
+    negative — the content is streamable but TMDB doesn't track that platform.
+    Regional language items are kept regardless; the PDF will note "OTT platform
+    not confirmed" for them.
 
     Args:
         items: List of ContentItem objects.
 
     Returns:
-        Filtered list of items with at least one OTT platform.
+        Filtered list.
     """
     before = len(items)
-    result = [item for item in items if item.ott_platforms]
+    result = [
+        item for item in items
+        if item.ott_platforms or item.language in REGIONAL_LANGUAGES
+    ]
     logger.info(
-        "OTT filter: %d -> %d items with confirmed OTT availability.",
+        "OTT filter: %d -> %d items (regional languages bypass OTT requirement).",
         before, len(result),
     )
     return result

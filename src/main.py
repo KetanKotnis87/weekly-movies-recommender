@@ -43,7 +43,8 @@ from src.config import (  # noqa: E402
     DISCOVER_TV_GENRE_IDS,
     DUB_LANGUAGES,
     GENRE_ORDER,
-    MAX_ENRICH_POOL,
+    MAX_ENRICH_POOL_GLOBAL,
+    MAX_ENRICH_POOL_PER_LANG,
     PRE_SELECT_MULTIPLIER,
     SUPPORTED_LANGUAGES,
     TOP_N,
@@ -588,17 +589,36 @@ def run_pipeline(dry_run: bool = False, force: bool = False) -> int:
     raw_movies, raw_series = _filter_raw_by_language(raw_movies, raw_series)
 
     # ------------------------------------------------------------------
-    # Cap enrichment pool to top N by TMDB popularity per category
-    # Discover supplement can produce 300+ candidates; calling
-    # external_ids for all of them burns too many TMDB API calls.
-    # Sorting by popularity keeps the most relevant titles.
+    # Language-aware pool cap before IMDB enrichment
+    # A simple global popularity sort would squeeze out Kannada/Tamil/
+    # Telugu/Malayalam films (low TMDB popularity) in favour of English.
+    # Strategy: top MAX_ENRICH_POOL_GLOBAL globally + top
+    # MAX_ENRICH_POOL_PER_LANG guaranteed slots per Indian language.
     # ------------------------------------------------------------------
-    if len(raw_movies) > MAX_ENRICH_POOL:
-        raw_movies = sorted(raw_movies, key=lambda r: r.popularity, reverse=True)[:MAX_ENRICH_POOL]
-        log.info("Capped movie pool to top %d by popularity.", MAX_ENRICH_POOL)
-    if len(raw_series) > MAX_ENRICH_POOL:
-        raw_series = sorted(raw_series, key=lambda r: r.popularity, reverse=True)[:MAX_ENRICH_POOL]
-        log.info("Capped series pool to top %d by popularity.", MAX_ENRICH_POOL)
+    def _cap_pool(records: list) -> list:
+        sorted_all = sorted(records, key=lambda r: r.popularity, reverse=True)
+        seen: set = set()
+        result = []
+        # Global top slots
+        for r in sorted_all[:MAX_ENRICH_POOL_GLOBAL]:
+            result.append(r)
+            seen.add(r.id)
+        # Guaranteed slots per Indian language
+        for lang in DISCOVER_LANGUAGES:
+            lang_records = [r for r in sorted_all if r.original_language == lang and r.id not in seen]
+            for r in lang_records[:MAX_ENRICH_POOL_PER_LANG]:
+                result.append(r)
+                seen.add(r.id)
+        return result
+
+    raw_movies = _cap_pool(raw_movies)
+    raw_series = _cap_pool(raw_series)
+    log.info(
+        "Pool after language-aware cap: %d movies, %d series "
+        "(global=%d + up to %d per lang × %d langs).",
+        len(raw_movies), len(raw_series),
+        MAX_ENRICH_POOL_GLOBAL, MAX_ENRICH_POOL_PER_LANG, len(DISCOVER_LANGUAGES),
+    )
 
     # ------------------------------------------------------------------
     # UC-009: IMDB enrichment via OMDb
